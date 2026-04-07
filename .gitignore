@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+*.lnk
+desktop.py
+_*.py
