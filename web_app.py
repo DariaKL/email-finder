@@ -125,7 +125,7 @@ def run_worker(task_id, table_name):
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(
-                _process_all(task_id, table_name, pending, need, has_email, loop)
+                _process_all(task_id, table_name, pending, need, est_has, loop)
             )
         finally:
             loop.close()

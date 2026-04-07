@@ -12,7 +12,6 @@ EXPOSE 10000
 
 CMD ["gunicorn", "web_app:app", \
      "--bind", "0.0.0.0:10000", \
-     "--worker-class", "gevent", \
      "--workers", "2", \
-     "--worker-connections", "100", \
+     "--threads", "8", \
      "--timeout", "600"]
