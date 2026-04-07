@@ -60,27 +60,19 @@ def airtable_fetch_empty(table_name):
     return records
 
 
-def airtable_count(table_name):
-    total = has_email = 0
-    offset = None
-    while True:
-        url = (f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{table_name}"
-               f"?pageSize=100&fields%5B%5D=Emails")
-        if offset:
-            url += f"&offset={offset}"
-        r = http_requests.get(url, headers=AIRTABLE_HEADERS, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        for rec in data.get("records", []):
-            total += 1
-            em = str(rec.get("fields", {}).get("Emails", "")).strip()
-            if em and em != "None":
-                has_email += 1
-        offset = data.get("offset")
-        if not offset:
-            break
-        time.sleep(0.22)
-    return total, has_email
+def airtable_count_fast(table_name):
+    """Quick estimate from 1 page only — no pagination delay."""
+    url = (f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{table_name}"
+           f"?pageSize=100&fields%5B%5D=Emails")
+    r = http_requests.get(url, headers=AIRTABLE_HEADERS, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    batch = data.get("records", [])
+    has_email = sum(1 for rec in batch
+                    if str(rec.get("fields", {}).get("Emails", "")).strip()
+                    not in ("", "None"))
+    has_more = "offset" in data
+    return len(batch), has_email, has_more
 
 
 def airtable_batch_update(table_name, updates):
@@ -102,10 +94,11 @@ def run_worker(task_id, table_name):
     task["events"].append(("status", json.dumps({"status": "loading"})))
 
     try:
-        # Count totals
-        total, has_email = airtable_count(table_name)
+        # Quick estimate (1 page, no delay)
+        est_total, est_has, has_more = airtable_count_fast(table_name)
+        suffix = '+' if has_more else ''
         task["events"].append(("log", json.dumps({
-            "msg": f"Table '{table_name}': {total} total, {has_email} with email"
+            "msg": f"Table '{table_name}': ~{est_total}{suffix} total, ~{est_has}{suffix} with email"
         })))
 
         # Fetch empty records
@@ -116,7 +109,7 @@ def run_worker(task_id, table_name):
 
         task["total"] = need
         task["events"].append(("counts", json.dumps({
-            "need": need, "has": has_email, "total": total
+            "need": need, "has": est_has, "total": est_total
         })))
         task["events"].append(("log", json.dumps({"msg": f"Need email: {need} domains"})))
 
