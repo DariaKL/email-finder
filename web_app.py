@@ -327,8 +327,24 @@ def stats(table_name):
     if table_name not in TABLES:
         return jsonify({"error": "Invalid table"}), 400
     try:
-        total, has_email = airtable_count(table_name)
-        return jsonify({"total": total, "has_email": has_email, "need": total - has_email})
+        # Quick estimate: only 1 page to avoid timeout
+        url = (f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{table_name}"
+               f"?pageSize=100&fields%5B%5D=Emails")
+        r = http_requests.get(url, headers=AIRTABLE_HEADERS, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        batch = data.get("records", [])
+        has_email = sum(1 for rec in batch
+                        if str(rec.get("fields", {}).get("Emails", "")).strip()
+                        not in ("", "None"))
+        has_more = "offset" in data
+        total_est = len(batch)
+        suffix = "+" if has_more else ""
+        return jsonify({
+            "total": f"{total_est}{suffix}",
+            "has_email": f"{has_email}{suffix}",
+            "need": f"{total_est - has_email}{suffix}",
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
