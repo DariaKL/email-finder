@@ -30,12 +30,25 @@ AIRTABLE_HEADERS = {
 
 TABLES = ["Anna", "Dasha", "Mykola", "Khrystia"]
 
-PARALLEL = 6
+PARALLEL = 3
 DEADLINE = 20
 
 # ── TASK STATE ──────────────────────────────────────────────
 
 tasks = {}  # task_id -> {...}
+
+
+def _cleanup_old_tasks():
+    """Remove completed tasks older than 30 minutes to free memory."""
+    import gc
+    cutoff = time.time() - 1800
+    dead = [tid for tid, t in list(tasks.items())
+            if t.get("status") in ("done", "stopped")
+            and t.get("created", 0) < cutoff]
+    for tid in dead:
+        tasks.pop(tid, None)
+    if dead:
+        gc.collect()
 
 
 # ── AIRTABLE HELPERS ────────────────────────────────────────
@@ -134,12 +147,14 @@ def run_worker(task_id, table_name):
         task["events"].append(("error", json.dumps({"msg": str(e)})))
 
     finally:
+        import gc
         if task.get("stop"):
             task["status"] = "stopped"
             task["events"].append(("status", json.dumps({"status": "stopped"})))
         elif task["status"] != "done":
             task["status"] = "done"
             task["events"].append(("status", json.dumps({"status": "done"})))
+        gc.collect()
 
 
 async def _process_all(task_id, table_name, pending, need, has_email, loop):
@@ -258,6 +273,8 @@ def start():
     if table_name not in TABLES:
         return jsonify({"error": "Invalid table"}), 400
 
+    _cleanup_old_tasks()
+
     task_id = str(uuid.uuid4())[:8]
     tasks[task_id] = {
         "table": table_name,
@@ -267,6 +284,7 @@ def start():
         "stop": False,
         "events": [],
         "cursor": 0,
+        "created": time.time(),
     }
 
     t = threading.Thread(target=run_worker, args=(task_id, table_name), daemon=True)
@@ -301,6 +319,8 @@ def events(task_id):
 
             if task["status"] in ("done", "stopped"):
                 yield f"event: done\ndata: {{}}\n\n"
+                # Free event memory once streaming is complete
+                task["events"] = []
                 break
 
             time.sleep(0.3)
