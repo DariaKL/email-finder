@@ -14,4 +14,6 @@ CMD ["gunicorn", "web_app:app", \
      "--bind", "0.0.0.0:10000", \
      "--workers", "1", \
      "--threads", "8", \
-     "--timeout", "600"]
+     "--timeout", "0", \
+     "--keep-alive", "75", \
+     "--worker-tmp-dir", "/dev/shm"]
