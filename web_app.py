@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Email Finder — Web App (Flask + SSE)
-4 Airtable tabs: Anna, Dasha, Mykola, Khrystia
+4 Airtable tabs: Anna, Vlad, Mykola, Khrystia
 """
 
 import os
@@ -28,7 +28,7 @@ AIRTABLE_HEADERS = {
     "Content-Type": "application/json",
 }
 
-TABLES = ["Anna", "Dasha", "Mykola", "Khrystia"]
+TABLES = ["Anna", "Vlad", "Mykola", "Khrystia"]
 
 PARALLEL = 3
 DEADLINE = 20

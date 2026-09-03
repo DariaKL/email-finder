@@ -4,7 +4,7 @@ Mass Email Finder — Airtable Integration
 Масовий пошук email-адрес для доменів з Airtable.
 
 Функціонал:
-  - Працює з вкладками: Dasha, Anna, Mykola, Khrystia
+    - Працює з вкладками: Vlad, Anna, Mykola, Khrystia
   - Рівномірна обробка: 10 доменів з однієї вкладки → 10 з наступної (round-robin)
   - Прямий пошук на сайті (головна, Contact, About, Editorial, Team тощо)
   - Пріоритезація: editor, marketing, advertising, sales, admin, pr, webmaster, news
@@ -84,7 +84,7 @@ _load_env()
 # ---------------------------------------------------------------------------
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN", "")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "")
-TABLE_NAMES = ["Dasha", "Anna", "Mykola", "Khrystia"]
+TABLE_NAMES = ["Vlad", "Anna", "Mykola", "Khrystia"]
 BATCH_SIZE = 10  # Скільки доменів обробляти з кожної вкладки за раунд
 
 FIELD_DOMAIN = "Domain"
@@ -884,7 +884,7 @@ def main():
     )
     parser.add_argument(
         "--tables", nargs="+", default=None,
-        help="Список вкладок (за замовчуванням: Dasha Anna Mykola Khrystia)",
+        help="Список вкладок (за замовчуванням: Vlad Anna Mykola Khrystia)",
     )
 
     args = parser.parse_args()
