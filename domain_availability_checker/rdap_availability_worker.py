@@ -22,8 +22,7 @@ from pyairtable import Api
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILES = (BASE_DIR.parent / ".env", BASE_DIR / ".env")
 BASE_ID = "appwWjm2yYVF7zCUV"
-TABLE_ID = "tblCHztOhSwA9apim"
-VIEW_ID = "viwHZvMVHew4eal57"
+TABLE_ID = "tblR1iWy4L0uIqREg"
 DOMAIN_FIELD = "Domain"
 INSTANT_FIELD = "instantdomainsearch.com"
 RDAP_FIELD = "RDAP"
@@ -125,7 +124,7 @@ def classify_domain(
 ) -> tuple[str | None, str]:
     endpoint = endpoint_for(domain, services)
     if endpoint is None:
-        return None, "unsupported"
+        return "need to check", "unsupported"
 
     for attempt in range(MAX_RETRIES + 1):
         if STOP_REQUESTED.is_set():
@@ -137,17 +136,17 @@ def classify_domain(
                 payload = response.json()
                 if payload.get("objectClassName") == "domain":
                     return "busy", "classified"
-                return None, "unexpected_200"
+                return "need to check", "unexpected_200"
             if response.status_code == 404:
                 try:
                     payload = response.json()
                 except ValueError:
-                    return None, "ambiguous_404"
+                    return "need to check", "ambiguous_404"
                 if payload.get("errorCode") == 404:
                     return "free", "classified"
-                return None, "ambiguous_404"
+                return "need to check", "ambiguous_404"
             if response.status_code not in {429, 500, 502, 503, 504}:
-                return None, f"http_{response.status_code}"
+                return "need to check", f"http_{response.status_code}"
         except (requests.RequestException, ValueError):
             if attempt == MAX_RETRIES:
                 return None, "network_or_json_error"
@@ -162,11 +161,7 @@ def load_targets(table, recheck_existing: bool) -> tuple[dict[str, list[str]], i
     formula = f"{{{INSTANT_FIELD}}}='available'"
     if not recheck_existing:
         formula = f"AND({formula},{{{RDAP_FIELD}}}=BLANK())"
-    records = table.all(
-        formula=formula,
-        view=VIEW_ID,
-        fields=[DOMAIN_FIELD, INSTANT_FIELD, RDAP_FIELD],
-    )
+    records = table.all(formula=formula, fields=[DOMAIN_FIELD, INSTANT_FIELD, RDAP_FIELD])
     domains: dict[str, list[str]] = defaultdict(list)
     for record in records:
         fields = record.get("fields", {})
@@ -224,6 +219,7 @@ def run(recheck_existing: bool = False) -> int:
             completed += 1
             counts[result] += 1
             if status:
+                counts[status] += 1
                 pending_updates.extend(
                     {"id": record_id, "fields": {RDAP_FIELD: status}}
                     for record_id in targets[domain]
@@ -237,8 +233,8 @@ def run(recheck_existing: bool = False) -> int:
                 print(
                     f"Progress {completed}/{total_domains}; free={counts['free']}; "
                     f"busy={counts['busy']}; written={counts['written']}; "
-                    f"unsupported={counts['unsupported']}; unresolved="
-                    f"{completed - counts['free'] - counts['busy'] - counts['unsupported']}.",
+                    f"need_to_check={counts['need to check']}; unresolved="
+                    f"{completed - counts['free'] - counts['busy'] - counts['need to check']}.",
                     flush=True,
                 )
             if STOP_REQUESTED.is_set():
@@ -248,11 +244,11 @@ def run(recheck_existing: bool = False) -> int:
         write_batch(table, pending_updates)
         counts["written"] += len(pending_updates)
 
-    unresolved = completed - counts["free"] - counts["busy"] - counts["unsupported"]
+    unresolved = completed - counts["free"] - counts["busy"] - counts["need to check"]
     print(
         f"Finished: processed={completed}/{total_domains}; written={counts['written']}; "
         f"free={counts['free']}; busy={counts['busy']}; "
-        f"unsupported={counts['unsupported']}; unresolved={unresolved}; "
+        f"need_to_check={counts['need to check']}; unresolved={unresolved}; "
         f"stopped={STOP_REQUESTED.is_set()}.",
         flush=True,
     )
