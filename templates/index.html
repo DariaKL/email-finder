@@ -122,6 +122,23 @@ tr:hover { background:#f8f9fa; }
                 <div class="log-panel" id="domainStatusLog-netim" aria-live="polite">Очікує запуску</div>
             </section>
         </div>
+        <div class="controls">
+            <strong>Drop Status copy</strong>
+        </div>
+        <div class="status-check-grid">
+            <section class="status-checker">
+                <div class="status-checker-head">
+                    <h2>RDAP</h2>
+                    <span class="status-label stopped" id="domainStatusLabel-rdap">Idle</span>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-start" id="domainStatusStart-rdap" onclick="startDomainStatus('rdap')">▶ Запустити / продовжити</button>
+                    <button class="btn btn-stop" id="domainStatusStop-rdap" onclick="stopDomainStatus('rdap')" disabled>■ Зупинити</button>
+                </div>
+                <label class="rdap-recheck-option"><input type="checkbox" id="domainStatusRdapRecheck"> Перевірити заново вже заповнені RDAP-статуси</label>
+                <div class="log-panel" id="domainStatusLog-rdap" aria-live="polite">Очікує запуску</div>
+            </section>
+        </div>
     </div>
 
     {% for t in tables %}
@@ -176,7 +193,7 @@ function switchTab(name) {
     document.getElementById('emailGlobalControls').style.display = name === 'domain-status' ? 'none' : '';
 }
 
-const domainStatusModes = ['instant', 'netim'];
+const domainStatusModes = ['instant', 'netim', 'rdap'];
 const domainStatusClient = Object.fromEntries(domainStatusModes.map(mode => [mode, 'idle']));
 
 function setDomainStatus(mode, status) {
@@ -211,7 +228,14 @@ async function startDomainStatus(mode) {
     if (domainStatusClient[mode] === 'running' || domainStatusClient[mode] === 'loading') return;
     setDomainStatus(mode, 'loading');
     try {
-        const response = await fetch(`/domain-status/start/${mode}`, {method:'POST'});
+        const options = {method:'POST'};
+        if (mode === 'rdap') {
+            options.headers = {'Content-Type':'application/json'};
+            options.body = JSON.stringify({
+                recheck_existing: document.getElementById('domainStatusRdapRecheck').checked
+            });
+        }
+        const response = await fetch(`/domain-status/start/${mode}`, options);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         await refreshDomainStatus();

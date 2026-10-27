@@ -45,6 +45,7 @@ DOMAIN_CHECKER_DIR = Path(__file__).resolve().parent / "domain_availability_chec
 DOMAIN_STATUS_MODES = {
     "instant": "--instant-only",
     "netim": "--netim-only",
+    "rdap": None,
 }
 domain_status_processes = {}
 domain_status_logs = {mode: deque(maxlen=300) for mode in DOMAIN_STATUS_MODES}
@@ -408,7 +409,8 @@ def start_domain_status(mode):
     if mode not in DOMAIN_STATUS_MODES:
         return jsonify({"error": "Invalid checker mode"}), 400
 
-    script = DOMAIN_CHECKER_DIR / "airtable_donor_status.py"
+    script_name = "rdap_availability_worker.py" if mode == "rdap" else "airtable_donor_status.py"
+    script = DOMAIN_CHECKER_DIR / script_name
     if not script.is_file():
         return jsonify({"error": "Airtable status worker is not installed"}), 503
 
@@ -433,8 +435,13 @@ def start_domain_status(mode):
             "-W",
             "ignore",
             str(script),
-            DOMAIN_STATUS_MODES[mode],
         ]
+        if mode == "rdap":
+            options_body = request.get_json(silent=True) or {}
+            if options_body.get("recheck_existing"):
+                command.append("--recheck-existing")
+        else:
+            command.append(DOMAIN_STATUS_MODES[mode])
         options = {
             "cwd": str(DOMAIN_CHECKER_DIR),
             "env": child_env,
