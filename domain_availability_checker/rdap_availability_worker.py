@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import threading
@@ -27,6 +28,7 @@ DOMAIN_FIELD = "Domain"
 INSTANT_FIELD = "instantdomainsearch.com"
 RDAP_FIELD = "RDAP"
 BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
+BOOTSTRAP_FILE = BASE_DIR / "rdap_bootstrap.json"
 MAX_WORKERS = 12
 PER_REGISTRY_INTERVAL_SEC = 1.0
 MAX_RETRIES = 4
@@ -58,9 +60,12 @@ def normalize_domain(value: object) -> str:
 
 
 def load_bootstrap() -> dict[str, tuple[str, ...]]:
-    response = requests.get(BOOTSTRAP_URL, timeout=(10, 30))
-    response.raise_for_status()
-    bootstrap = response.json()
+    if BOOTSTRAP_FILE.is_file():
+        bootstrap = json.loads(BOOTSTRAP_FILE.read_text(encoding="utf-8"))
+    else:
+        response = requests.get(BOOTSTRAP_URL, timeout=(10, 30))
+        response.raise_for_status()
+        bootstrap = response.json()
     services: dict[str, tuple[str, ...]] = {}
     for suffixes, urls in bootstrap.get("services", []):
         endpoints = tuple(str(url).rstrip("/") for url in urls if str(url).startswith("https://"))
@@ -68,6 +73,8 @@ def load_bootstrap() -> dict[str, tuple[str, ...]]:
             continue
         for suffix in suffixes:
             services[str(suffix).lower().lstrip(".")] = endpoints
+    if not services:
+        raise ValueError("RDAP bootstrap contains no usable HTTPS services")
     return services
 
 
@@ -202,7 +209,12 @@ def run(recheck_existing: bool = False) -> int:
         return 0
 
     print("Loading IANA RDAP bootstrap...", flush=True)
-    services = load_bootstrap()
+    try:
+        services = load_bootstrap()
+    except (OSError, requests.RequestException, ValueError) as exc:
+        print(f"Could not load RDAP bootstrap: {exc}", flush=True)
+        return 1
+    print(f"RDAP bootstrap loaded: {len(services)} suffixes; starting checks.", flush=True)
     limiter = RegistryRateLimiter()
     counts: Counter[str] = Counter()
     pending_updates: list[dict] = []
@@ -229,7 +241,7 @@ def run(recheck_existing: bool = False) -> int:
                     counts["written"] += len(pending_updates)
                     pending_updates.clear()
 
-            if completed % 250 == 0:
+            if completed % 50 == 0 or completed == total_domains:
                 print(
                     f"Progress {completed}/{total_domains}; free={counts['free']}; "
                     f"busy={counts['busy']}; written={counts['written']}; "
