@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
+from typing import TypeVar
 
 import gspread
 from playwright._impl._errors import TargetClosedError
@@ -177,7 +178,10 @@ def write_back(ws: gspread.Worksheet, results: list[StatusResult], status_col_na
     ws.batch_update(data, value_input_option="RAW")
 
 
-def chunked[T](items: list[T], size: int) -> list[list[T]]:
+T = TypeVar("T")
+
+
+def chunked(items: list[T], size: int) -> list[list[T]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
