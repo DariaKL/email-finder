@@ -10,8 +10,12 @@ import json
 import time
 import uuid
 import asyncio
+import signal
+import subprocess
 import threading
 import urllib.parse
+from collections import deque
+from pathlib import Path
 import requests as http_requests
 from flask import Flask, render_template, request, Response, jsonify, stream_with_context
 
@@ -36,6 +40,48 @@ DEADLINE = 20
 # ── TASK STATE ──────────────────────────────────────────────
 
 tasks = {}  # task_id -> {...}
+
+DOMAIN_CHECKER_DIR = Path(__file__).resolve().parent / "domain_availability_checker"
+DOMAIN_STATUS_MODES = {
+    "instant": "--instant-only",
+    "netim": "--netim-only",
+}
+domain_status_processes = {}
+domain_status_logs = {mode: deque(maxlen=300) for mode in DOMAIN_STATUS_MODES}
+domain_status_lock = threading.RLock()
+
+
+def _domain_status_python():
+    candidates = (
+        DOMAIN_CHECKER_DIR / ".venv" / "Scripts" / "python.exe",
+        DOMAIN_CHECKER_DIR / ".venv" / "bin" / "python",
+    )
+    return str(next((path for path in candidates if path.exists()), Path(sys.executable)))
+
+
+def _domain_status_environment():
+    env = os.environ.copy()
+    root_env = Path(__file__).resolve().parent / ".env"
+    if root_env.exists():
+        for raw_line in root_env.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() == "AIRTABLE_TOKEN":
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    env["AIRTABLE_TOKEN"] = value
+                break
+    return env
+
+
+def _read_domain_status_output(mode, process):
+    if process.stdout is not None:
+        for line in process.stdout:
+            with domain_status_lock:
+                domain_status_logs[mode].append(line.rstrip())
+    process.wait()
 
 
 def _cleanup_old_tasks():
@@ -333,6 +379,109 @@ def events(task_id):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.route("/domain-status/state")
+def domain_status_state():
+    workers = {}
+    with domain_status_lock:
+        for mode in DOMAIN_STATUS_MODES:
+            process = domain_status_processes.get(mode)
+            return_code = process.poll() if process else None
+            if process is None:
+                status = "idle"
+            elif return_code is None:
+                status = "running"
+            else:
+                status = "done" if return_code == 0 else "error"
+            workers[mode] = {
+                "status": status,
+                "pid": process.pid if process else None,
+                "return_code": return_code,
+                "log": list(domain_status_logs[mode]),
+            }
+    return jsonify({"workers": workers})
+
+
+@app.route("/domain-status/start/<mode>", methods=["POST"])
+def start_domain_status(mode):
+    if mode not in DOMAIN_STATUS_MODES:
+        return jsonify({"error": "Invalid checker mode"}), 400
+
+    script = DOMAIN_CHECKER_DIR / "airtable_donor_status.py"
+    if not script.is_file():
+        return jsonify({"error": "Airtable status worker is not installed"}), 503
+
+    child_env = _domain_status_environment()
+    if not child_env.get("AIRTABLE_TOKEN", "").strip():
+        return jsonify({"error": "AIRTABLE_TOKEN is not configured on the web server"}), 503
+
+    with domain_status_lock:
+        for running_mode, process in domain_status_processes.items():
+            if process.poll() is None:
+                return jsonify({
+                    "error": f"A status check is already running ({running_mode})",
+                    "mode": running_mode,
+                    "pid": process.pid,
+                }), 409
+
+        domain_status_logs[mode].clear()
+        domain_status_logs[mode].append("Starting checker; connecting to Airtable...")
+        command = [
+            _domain_status_python(),
+            "-u",
+            "-W",
+            "ignore",
+            str(script),
+            DOMAIN_STATUS_MODES[mode],
+        ]
+        options = {
+            "cwd": str(DOMAIN_CHECKER_DIR),
+            "env": child_env,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+        }
+        if os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            options["start_new_session"] = True
+        try:
+            process = subprocess.Popen(command, **options)
+        except OSError as error:
+            return jsonify({"error": f"Could not start status checker: {error}"}), 500
+        domain_status_processes[mode] = process
+
+    threading.Thread(target=_read_domain_status_output, args=(mode, process), daemon=True).start()
+    return jsonify({"ok": True, "mode": mode, "pid": process.pid})
+
+
+@app.route("/domain-status/stop/<mode>", methods=["POST"])
+def stop_domain_status(mode):
+    if mode not in DOMAIN_STATUS_MODES:
+        return jsonify({"error": "Invalid checker mode"}), 400
+
+    with domain_status_lock:
+        process = domain_status_processes.get(mode)
+        if process is None or process.poll() is not None:
+            return jsonify({"error": "No running status check"}), 409
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=True,
+                )
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+        except (OSError, subprocess.SubprocessError) as error:
+            return jsonify({"error": f"Could not stop status checker: {error}"}), 500
+    return jsonify({"ok": True, "mode": mode})
 
 
 @app.route("/stats/<table_name>")

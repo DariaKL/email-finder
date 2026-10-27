@@ -2,3 +2,6 @@ flask==3.1.*
 gunicorn==23.*
 aiohttp==3.*
 requests==2.*
+gspread==6.*
+playwright==1.*
+pyairtable==3.*

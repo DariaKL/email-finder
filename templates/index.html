@@ -60,6 +60,14 @@ tr:hover { background:#f8f9fa; }
 .tab-content.active { display:block; }
 .empty-state { text-align:center; padding:60px 20px; color:#999; }
 .empty-state svg { width:64px; height:64px; fill:#ddd; margin-bottom:16px; }
+.status-check-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.status-checker { background:#fff; border:1px solid #ddd; border-radius:6px; padding:16px; min-width:0; }
+.status-checker-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+.status-checker h2 { font-size:16px; font-weight:600; }
+.status-checker .controls { margin-bottom:0; }
+.status-checker .log-panel { height:260px; margin-top:12px; }
+.status-checker .status-label.error { background:#FFEBEE; color:#C62828; }
+@media (max-width:760px) { .status-check-grid { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -76,13 +84,44 @@ tr:hover { background:#f8f9fa; }
         <span class="tab-badge" id="badge-{{ t }}"></span>
     </div>
     {% endfor %}
+    <div class="tab" data-tab="domain-status" onclick="switchTab('domain-status')">Статуси сайтів</div>
 </div>
 
 <div class="container">
-    <div class="controls">
+    <div class="controls" id="emailGlobalControls">
         <button class="btn btn-start-all" onclick="startAll()">▶▶ Start All</button>
         <button class="btn btn-stop-all" onclick="stopAll()">■■ Stop All</button>
         <div class="stats" id="globalStats"></div>
+    </div>
+
+    <div class="tab-content" id="panel-domain-status">
+        <div class="controls">
+            <strong>Drop Status · Table 1</strong>
+        </div>
+        <div class="status-check-grid">
+            <section class="status-checker">
+                <div class="status-checker-head">
+                    <h2>Instant Domain Search</h2>
+                    <span class="status-label stopped" id="domainStatusLabel-instant">Idle</span>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-start" id="domainStatusStart-instant" onclick="startDomainStatus('instant')">▶ Запустити Instant</button>
+                    <button class="btn btn-stop" id="domainStatusStop-instant" onclick="stopDomainStatus('instant')" disabled>■ Зупинити</button>
+                </div>
+                <div class="log-panel" id="domainStatusLog-instant" aria-live="polite">Очікує запуску</div>
+            </section>
+            <section class="status-checker">
+                <div class="status-checker-head">
+                    <h2>Netim</h2>
+                    <span class="status-label stopped" id="domainStatusLabel-netim">Idle</span>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-start" id="domainStatusStart-netim" onclick="startDomainStatus('netim')">▶ Запустити Netim</button>
+                    <button class="btn btn-stop" id="domainStatusStop-netim" onclick="stopDomainStatus('netim')" disabled>■ Зупинити</button>
+                </div>
+                <div class="log-panel" id="domainStatusLog-netim" aria-live="polite">Очікує запуску</div>
+            </section>
+        </div>
     </div>
 
     {% for t in tables %}
@@ -132,8 +171,71 @@ function switchTab(name) {
     document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
     document.querySelector(`.tab[data-tab="${name}"]`).classList.add('active');
-    document.getElementById(`panel-${name}`).classList.add('active');
+    const panelId = name === 'domain-status' ? 'panel-domain-status' : `panel-${name}`;
+    document.getElementById(panelId).classList.add('active');
+    document.getElementById('emailGlobalControls').style.display = name === 'domain-status' ? 'none' : '';
 }
+
+const domainStatusModes = ['instant', 'netim'];
+const domainStatusClient = Object.fromEntries(domainStatusModes.map(mode => [mode, 'idle']));
+
+function setDomainStatus(mode, status) {
+    domainStatusClient[mode] = status;
+    const label = document.getElementById(`domainStatusLabel-${mode}`);
+    const names = {idle:'Idle', running:'Running', loading:'Starting...', done:'Done', error:'Error'};
+    label.textContent = names[status] || status;
+    label.className = `status-label ${status === 'idle' ? 'stopped' : status}`;
+    const active = status === 'running' || status === 'loading';
+    document.getElementById(`domainStatusStart-${mode}`).disabled = active;
+    document.getElementById(`domainStatusStop-${mode}`).disabled = !active;
+}
+
+function renderDomainStatus(mode, data) {
+    setDomainStatus(mode, data.status || 'idle');
+    const log = document.getElementById(`domainStatusLog-${mode}`);
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+    log.textContent = (data.log || []).join('\n') || 'Очікує запуску';
+    if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function refreshDomainStatus() {
+    try {
+        const response = await fetch('/domain-status/state', {cache:'no-store'});
+        const data = await response.json();
+        if (!response.ok) return;
+        domainStatusModes.forEach(mode => renderDomainStatus(mode, data.workers[mode] || {}));
+    } catch (_) {}
+}
+
+async function startDomainStatus(mode) {
+    if (domainStatusClient[mode] === 'running' || domainStatusClient[mode] === 'loading') return;
+    setDomainStatus(mode, 'loading');
+    try {
+        const response = await fetch(`/domain-status/start/${mode}`, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        await refreshDomainStatus();
+    } catch (error) {
+        const log = document.getElementById(`domainStatusLog-${mode}`);
+        log.textContent = `[ERROR] ${error.message}`;
+        setDomainStatus(mode, 'error');
+    }
+}
+
+async function stopDomainStatus(mode) {
+    try {
+        const response = await fetch(`/domain-status/stop/${mode}`, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        await refreshDomainStatus();
+    } catch (error) {
+        const log = document.getElementById(`domainStatusLog-${mode}`);
+        log.textContent += `\n[ERROR] ${error.message}`;
+    }
+}
+
+refreshDomainStatus();
+setInterval(refreshDomainStatus, 2000);
 
 function setStatus(tab, status) {
     state[tab].status = status;
