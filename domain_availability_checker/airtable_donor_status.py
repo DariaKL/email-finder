@@ -21,6 +21,7 @@ SETTINGS = {
     "base_id": "appwWjm2yYVF7zCUV",
     "table_id": "tblR1iWy4L0uIqREg",
     "field_domain": "Domain",
+    "field_rdap": "RDAP",
     "field_instant": "instantdomainsearch.com",
     "field_netim": "Netim",
     "field_netim_price": "Netim Price",
@@ -94,6 +95,27 @@ def save_prices(table, records: list[dict], prices: dict[str, float]) -> int:
     return len(updates)
 
 
+def select_netim_records(records: list[dict], mode: str) -> list[dict]:
+    domain_field = SETTINGS["field_domain"]
+    netim_field = SETTINGS["field_netim"]
+    if mode == "rdap_need_to_check_netim":
+        return [
+            record
+            for record in records
+            if normalize_domain(record.get("fields", {}).get(domain_field))
+            and str(record.get("fields", {}).get(SETTINGS["field_rdap"], "")).strip().lower()
+            == "need to check"
+        ]
+    return [
+        record
+        for record in records
+        if normalize_domain(record.get("fields", {}).get(domain_field))
+        and str(record.get("fields", {}).get(SETTINGS["field_instant"], "") or "").strip().lower()
+        == "available"
+        and not str(record.get("fields", {}).get(netim_field, "") or "").strip()
+    ]
+
+
 def is_auth_error(error: Exception) -> bool:
     response = getattr(error, "response", None)
     return getattr(response, "status_code", None) in {401, 403}
@@ -155,7 +177,7 @@ def process_table(table, mode: str = "all") -> None:
     instant_field = SETTINGS["field_instant"]
     netim_field = SETTINGS["field_netim"]
     check_instant_only = mode in {"all", "instant"}
-    check_netim_only = mode in {"all", "netim"}
+    check_netim_only = mode in {"all", "netim", "rdap_need_to_check_netim"}
 
     pending_instant = [
         record
@@ -164,18 +186,11 @@ def process_table(table, mode: str = "all") -> None:
         and normalize_domain(record.get("fields", {}).get(domain_field))
         and not str(record.get("fields", {}).get(instant_field, "") or "").strip()
     ]
-    pending_netim = [
-        record
-        for record in records
-        if check_netim_only
-        and normalize_domain(record.get("fields", {}).get(domain_field))
-        and str(record.get("fields", {}).get(instant_field, "") or "").strip().lower() == "available"
-        and not str(record.get("fields", {}).get(netim_field, "") or "").strip()
-    ]
+    pending_netim = select_netim_records(records, mode) if check_netim_only else []
     pending_prices = [
         record
         for record in records
-        if check_netim_only
+        if mode in {"all", "netim"}
         and normalize_domain(record.get("fields", {}).get(domain_field))
         and str(record.get("fields", {}).get(netim_field, "") or "").strip()
         and not str(record.get("fields", {}).get(SETTINGS["field_netim_price"], "") or "").strip()
@@ -183,7 +198,12 @@ def process_table(table, mode: str = "all") -> None:
 
     print(
         f"Airtable records: {len(records)}; Instant pending: {len(pending_instant)}; "
-        f"Netim pending from available: {len(pending_netim)}.",
+        f"Netim pending: {len(pending_netim)}"
+        + (
+            " from RDAP need-to-check."
+            if mode == "rdap_need_to_check_netim"
+            else f"; Instant available: {len(pending_netim)}."
+        ),
         flush=True,
     )
 
@@ -238,13 +258,27 @@ def process_table(table, mode: str = "all") -> None:
                 prices: dict[str, float] = {}
                 statuses = check_netim_batch(page, domains, prices)
                 if statuses is not None:
-                    status_batch = [
-                        record
-                        for record in batch
-                        if not str(record.get("fields", {}).get(netim_field, "") or "").strip()
-                    ]
-                    written = save_statuses(table, status_batch, netim_field, statuses)
-                    prices_written = save_prices(table, batch, prices)
+                    if mode == "rdap_need_to_check_netim":
+                        confirmed = {
+                            domain: status
+                            for domain, status in statuses.items()
+                            if status in {"available", "taken"}
+                        }
+                        status_batch = [
+                            record
+                            for record in batch
+                            if normalize_domain(record.get("fields", {}).get(domain_field)) in confirmed
+                        ]
+                        written = save_statuses(table, status_batch, netim_field, confirmed)
+                        prices_written = 0
+                    else:
+                        status_batch = [
+                            record
+                            for record in batch
+                            if not str(record.get("fields", {}).get(netim_field, "") or "").strip()
+                        ]
+                        written = save_statuses(table, status_batch, netim_field, statuses)
+                        prices_written = save_prices(table, batch, prices)
                     print(
                         f"  Wrote {written} Netim statuses and {prices_written} Netim prices.",
                         flush=True,
@@ -263,8 +297,21 @@ def main() -> int:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--instant-only", action="store_true", help="Check only Instant Domain Search.")
     modes.add_argument("--netim-only", action="store_true", help="Check only Netim status and price.")
+    modes.add_argument(
+        "--rdap-need-to-check-netim",
+        action="store_true",
+        help="Check only RDAP need-to-check donors on Netim and write confirmed statuses.",
+    )
     args = parser.parse_args()
-    mode = "instant" if args.instant_only else "netim" if args.netim_only else "all"
+    mode = (
+        "instant"
+        if args.instant_only
+        else "netim"
+        if args.netim_only
+        else "rdap_need_to_check_netim"
+        if args.rdap_need_to_check_netim
+        else "all"
+    )
 
     load_local_env()
     token = os.environ.get("AIRTABLE_TOKEN", "").strip()

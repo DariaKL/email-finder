@@ -45,6 +45,7 @@ DOMAIN_CHECKER_DIR = Path(__file__).resolve().parent / "domain_availability_chec
 DOMAIN_STATUS_MODES = {
     "instant": "--instant-only",
     "netim": "--netim-only",
+    "netim_rdap": "--rdap-need-to-check-netim",
     "rdap": None,
 }
 domain_status_processes = {}
