@@ -149,7 +149,7 @@ def classify_domain(
                 try:
                     payload = response.json()
                 except ValueError:
-                    return "need to check", "ambiguous_404"
+                    return "free", "not_found"
                 if payload.get("errorCode") == 404:
                     return "free", "classified"
                 return "need to check", "ambiguous_404"
@@ -165,9 +165,15 @@ def classify_domain(
     return None, "retry_exhausted"
 
 
-def load_targets(table, recheck_existing: bool) -> tuple[dict[str, list[str]], int]:
+def load_targets(
+    table,
+    recheck_existing: bool,
+    recheck_need_to_check: bool = False,
+) -> tuple[dict[str, list[str]], int]:
     formula = f"{{{INSTANT_FIELD}}}='available'"
-    if not recheck_existing:
+    if recheck_need_to_check:
+        formula = f"AND({formula},{{{RDAP_FIELD}}}='need to check')"
+    elif not recheck_existing:
         formula = f"AND({formula},{{{RDAP_FIELD}}}=BLANK())"
     records = table.all(formula=formula, fields=[DOMAIN_FIELD, INSTANT_FIELD, RDAP_FIELD])
     domains: dict[str, list[str]] = defaultdict(list)
@@ -212,7 +218,10 @@ def write_batch(table, pending: list[dict]) -> None:
         time.sleep(0.22)
 
 
-def run(recheck_existing: bool = False) -> int:
+def run(
+    recheck_existing: bool = False,
+    recheck_need_to_check: bool = False,
+) -> int:
     load_local_env()
     token = os.environ.get("AIRTABLE_TOKEN", "").strip()
     if not token:
@@ -225,11 +234,22 @@ def run(recheck_existing: bool = False) -> int:
         signal.signal(signal.SIGBREAK, lambda _signum, _frame: STOP_REQUESTED.set())
 
     table = Api(token).table(BASE_ID, TABLE_ID)
-    targets, candidate_records = load_targets(table, recheck_existing)
+    targets, candidate_records = load_targets(
+        table,
+        recheck_existing,
+        recheck_need_to_check,
+    )
     total_domains = len(targets)
+    mode = (
+        "recheck need to check"
+        if recheck_need_to_check
+        else "recheck existing"
+        if recheck_existing
+        else "resume blank RDAP only"
+    )
     print(
         f"Available records selected: {candidate_records}; unique domains queued: {total_domains}; "
-        f"mode: {'recheck existing' if recheck_existing else 'resume blank RDAP only' }.",
+        f"mode: {mode}.",
         flush=True,
     )
     if not targets:
@@ -272,10 +292,13 @@ def run(recheck_existing: bool = False) -> int:
             counts[result] += 1
             if status:
                 counts[status] += 1
-                pending_updates.extend(
-                    {"id": record_id, "fields": {RDAP_FIELD: status}}
-                    for record_id in targets[domain]
-                )
+                if recheck_need_to_check and status == "need to check":
+                    counts["unchanged"] += len(targets[domain])
+                else:
+                    pending_updates.extend(
+                        {"id": record_id, "fields": {RDAP_FIELD: status}}
+                        for record_id in targets[domain]
+                    )
                 if len(pending_updates) >= BATCH_SIZE:
                     write_batch(table, pending_updates)
                     counts["written"] += len(pending_updates)
@@ -285,7 +308,7 @@ def run(recheck_existing: bool = False) -> int:
                 print(
                     f"Progress {completed}/{total_domains}; free={counts['free']}; "
                     f"busy={counts['busy']}; written={counts['written']}; "
-                    f"need_to_check={counts['need to check']}; unresolved="
+                    f"need_to_check={counts['need to check']}; unchanged={counts['unchanged']}; unresolved="
                     f"{completed - counts['free'] - counts['busy'] - counts['need to check']}.",
                     flush=True,
                 )
@@ -300,7 +323,7 @@ def run(recheck_existing: bool = False) -> int:
     print(
         f"Finished: processed={completed}/{total_domains}; written={counts['written']}; "
         f"free={counts['free']}; busy={counts['busy']}; "
-        f"need_to_check={counts['need to check']}; unresolved={unresolved}; "
+        f"need_to_check={counts['need to check']}; unchanged={counts['unchanged']}; unresolved={unresolved}; "
         f"stopped={STOP_REQUESTED.is_set()}.",
         flush=True,
     )
@@ -309,13 +332,22 @@ def run(recheck_existing: bool = False) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check available Airtable domains through registry RDAP.")
-    parser.add_argument(
+    recheck_group = parser.add_mutually_exclusive_group()
+    recheck_group.add_argument(
         "--recheck-existing",
         action="store_true",
         help="Recheck and overwrite existing RDAP values as well as blanks.",
     )
+    recheck_group.add_argument(
+        "--recheck-need-to-check",
+        action="store_true",
+        help="Recheck only available domains whose RDAP value is 'need to check'.",
+    )
     args = parser.parse_args()
-    return run(recheck_existing=args.recheck_existing)
+    return run(
+        recheck_existing=args.recheck_existing,
+        recheck_need_to_check=args.recheck_need_to_check,
+    )
 
 
 if __name__ == "__main__":

@@ -438,8 +438,12 @@ def start_domain_status(mode):
         ]
         if mode == "rdap":
             options_body = request.get_json(silent=True) or {}
+            if options_body.get("recheck_existing") and options_body.get("recheck_need_to_check"):
+                return jsonify({"error": "RDAP recheck modes are mutually exclusive"}), 400
             if options_body.get("recheck_existing"):
                 command.append("--recheck-existing")
+            elif options_body.get("recheck_need_to_check"):
+                command.append("--recheck-need-to-check")
         else:
             command.append(DOMAIN_STATUS_MODES[mode])
         options = {
