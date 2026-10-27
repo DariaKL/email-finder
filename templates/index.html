@@ -123,7 +123,18 @@ tr:hover { background:#f8f9fa; }
             </section>
             <section class="status-checker">
                 <div class="status-checker-head">
-                    <h2>3. RDAP Search</h2>
+                    <h2>3. Netim Search · RDAP need to check</h2>
+                    <span class="status-label stopped" id="domainStatusLabel-netim_rdap">Idle</span>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-start" id="domainStatusStart-netim_rdap" onclick="startDomainStatus('netim_rdap')">▶ Перевірити через Netim</button>
+                    <button class="btn btn-stop" id="domainStatusStop-netim_rdap" onclick="stopDomainStatus('netim_rdap')" disabled>■ Зупинити</button>
+                </div>
+                <div class="log-panel" id="domainStatusLog-netim_rdap" aria-live="polite">Очікує запуску</div>
+            </section>
+            <section class="status-checker">
+                <div class="status-checker-head">
+                    <h2>4. RDAP Search</h2>
                     <span class="status-label stopped" id="domainStatusLabel-rdap">Idle</span>
                 </div>
                 <div class="controls">
@@ -132,17 +143,6 @@ tr:hover { background:#f8f9fa; }
                 </div>
                 <label class="rdap-recheck-option"><input type="checkbox" id="domainStatusRdapRecheck"> Перевірити заново вже заповнені RDAP-статуси</label>
                 <div class="log-panel" id="domainStatusLog-rdap" aria-live="polite">Очікує запуску</div>
-            </section>
-            <section class="status-checker">
-                <div class="status-checker-head">
-                    <h2>4. Netim Search · RDAP need to check</h2>
-                    <span class="status-label stopped" id="domainStatusLabel-netim_rdap">Idle</span>
-                </div>
-                <div class="controls">
-                    <button class="btn btn-start" id="domainStatusStart-netim_rdap" onclick="startDomainStatus('netim_rdap')">▶ Перевірити через Netim</button>
-                    <button class="btn btn-stop" id="domainStatusStop-netim_rdap" onclick="stopDomainStatus('netim_rdap')" disabled>■ Зупинити</button>
-                </div>
-                <div class="log-panel" id="domainStatusLog-netim_rdap" aria-live="polite">Очікує запуску</div>
             </section>
         </div>
     </div>
