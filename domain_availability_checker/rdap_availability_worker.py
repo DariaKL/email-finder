@@ -10,10 +10,11 @@ import signal
 import threading
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from queue import Empty, Queue
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -102,7 +103,7 @@ class RegistryRateLimiter:
             response = requests.get(
                 f"{endpoint}/domain/{quote(domain, safe='.-')}",
                 headers={"Accept": "application/rdap+json, application/json"},
-                timeout=(10, 30),
+                timeout=(5, 10),
             )
             self._last_request[host] = time.monotonic()
             return response
@@ -178,6 +179,33 @@ def load_targets(table, recheck_existing: bool) -> tuple[dict[str, list[str]], i
     return domains, len(records)
 
 
+def group_targets_by_registry(
+    targets: dict[str, list[str]],
+    services: dict[str, tuple[str, ...]],
+) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = defaultdict(list)
+    for domain in targets:
+        endpoint = endpoint_for(domain, services)
+        registry = (
+            urlsplit(endpoint).netloc.lower()
+            if endpoint
+            else f"unsupported:{domain.rsplit('.', 1)[-1]}"
+        )
+        groups[registry].append(domain)
+    return groups
+
+
+def check_registry_group(domains, services, limiter, results) -> None:
+    for domain in domains:
+        if STOP_REQUESTED.is_set():
+            return
+        try:
+            status, result = classify_domain(domain, services, limiter)
+        except Exception as exc:
+            status, result = None, f"worker_error:{type(exc).__name__}"
+        results.put((domain, status, result))
+
+
 def write_batch(table, pending: list[dict]) -> None:
     if pending:
         table.batch_update(pending, typecast=True)
@@ -216,18 +244,30 @@ def run(recheck_existing: bool = False) -> int:
         return 1
     print(f"RDAP bootstrap loaded: {len(services)} suffixes; starting checks.", flush=True)
     limiter = RegistryRateLimiter()
+    registry_groups = group_targets_by_registry(targets, services)
+    results = Queue()
     counts: Counter[str] = Counter()
     pending_updates: list[dict] = []
     completed = 0
+    print(
+        f"Checks scheduled across {len(registry_groups)} registry groups.",
+        flush=True,
+    )
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {
-            pool.submit(classify_domain, domain, services, limiter): domain
-            for domain in targets
-        }
-        for future in as_completed(futures):
-            domain = futures[future]
-            status, result = future.result()
+        futures = [
+            pool.submit(check_registry_group, domains, services, limiter, results)
+            for domains in registry_groups.values()
+        ]
+        while completed < total_domains and not STOP_REQUESTED.is_set():
+            try:
+                domain, status, result = results.get(timeout=1)
+            except Empty:
+                if all(future.done() for future in futures):
+                    for future in futures:
+                        future.result()
+                    break
+                continue
             completed += 1
             counts[result] += 1
             if status:
