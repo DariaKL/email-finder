@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import threading
@@ -29,7 +28,6 @@ DOMAIN_FIELD = "Domain"
 INSTANT_FIELD = "instantdomainsearch.com"
 RDAP_FIELD = "RDAP"
 BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
-BOOTSTRAP_FILE = BASE_DIR / "rdap_bootstrap.json"
 MAX_WORKERS = 12
 PER_REGISTRY_INTERVAL_SEC = 1.0
 MAX_RETRIES = 4
@@ -62,15 +60,28 @@ def normalize_domain(value: object) -> str:
 
 
 def load_bootstrap() -> dict[str, tuple[str, ...]]:
-    if BOOTSTRAP_FILE.is_file():
-        bootstrap = json.loads(BOOTSTRAP_FILE.read_text(encoding="utf-8"))
-    else:
-        response = requests.get(BOOTSTRAP_URL, timeout=(10, 30))
-        response.raise_for_status()
-        bootstrap = response.json()
+    response = requests.get(
+        BOOTSTRAP_URL,
+        headers={"Accept": "application/json"},
+        timeout=(10, 30),
+    )
+    response.raise_for_status()
+    bootstrap = response.json()
+    if not isinstance(bootstrap, dict):
+        raise ValueError("IANA RDAP bootstrap must be a JSON object")
+
     services: dict[str, tuple[str, ...]] = {}
-    for suffixes, urls in bootstrap.get("services", []):
-        endpoints = tuple(str(url).rstrip("/") for url in urls if str(url).startswith("https://"))
+    for service in bootstrap.get("services", []):
+        if not isinstance(service, list) or len(service) != 2:
+            continue
+        suffixes, urls = service
+        if not isinstance(suffixes, list) or not isinstance(urls, list):
+            continue
+        endpoints = tuple(
+            url.rstrip("/")
+            for url in urls
+            if isinstance(url, str) and url.lower().startswith("https://")
+        )
         if not endpoints:
             continue
         for suffix in suffixes:
@@ -80,33 +91,38 @@ def load_bootstrap() -> dict[str, tuple[str, ...]]:
     return services
 
 
-def endpoint_for(domain: str, services: dict[str, tuple[str, ...]]) -> str | None:
+def endpoints_for(domain: str, services: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
     labels = domain.lower().split(".")
     for index in range(len(labels)):
         suffix = ".".join(labels[index:])
         endpoints = services.get(suffix)
         if endpoints:
-            return endpoints[0]
-    return None
+            return endpoints
+    return ()
+
+
+def endpoint_for(domain: str, services: dict[str, tuple[str, ...]]) -> str | None:
+    endpoints = endpoints_for(domain, services)
+    return endpoints[0] if endpoints else None
 
 
 class RegistryRateLimiter:
     def __init__(self) -> None:
-        self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
-        self._last_request: dict[str, float] = defaultdict(float)
+        self._lock = threading.Lock()
+        self._last_request: float | None = None
 
     def get(self, endpoint: str, domain: str) -> requests.Response:
-        host = urlsplit(endpoint).netloc.lower()
-        with self._locks[host]:
-            wait_for = PER_REGISTRY_INTERVAL_SEC - (time.monotonic() - self._last_request[host])
-            if wait_for > 0:
-                time.sleep(wait_for)
+        with self._lock:
+            if self._last_request is not None:
+                wait_for = PER_REGISTRY_INTERVAL_SEC - (time.monotonic() - self._last_request)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+            self._last_request = time.monotonic()
             response = requests.get(
                 f"{endpoint}/domain/{quote(domain, safe='.-')}",
                 headers={"Accept": "application/rdap+json, application/json"},
                 timeout=(5, 10),
             )
-            self._last_request[host] = time.monotonic()
             return response
 
 
@@ -131,41 +147,59 @@ def classify_domain(
     services: dict[str, tuple[str, ...]],
     limiter: RegistryRateLimiter,
 ) -> tuple[str | None, str]:
-    endpoint = endpoint_for(domain, services)
-    if endpoint is None:
+    endpoints = endpoints_for(domain, services)
+    if not endpoints:
         return "need to check", "unsupported"
 
     for attempt in range(MAX_RETRIES + 1):
         if STOP_REQUESTED.is_set():
             return None, "stopped"
         response = None
-        try:
-            response = limiter.get(endpoint, domain)
+        only_connect_timeouts = True
+        last_result = "retry_exhausted"
+        for endpoint in endpoints:
+            if STOP_REQUESTED.is_set():
+                return None, "stopped"
+            try:
+                response = limiter.get(endpoint, domain)
+            except requests.ConnectTimeout:
+                last_result = "connect_timeout"
+                continue
+            except requests.RequestException:
+                only_connect_timeouts = False
+                last_result = "network_or_json_error"
+                continue
+
+            only_connect_timeouts = False
             if response.status_code == 200:
-                payload = response.json()
-                if payload.get("objectClassName") == "domain":
+                try:
+                    payload = response.json()
+                except ValueError:
+                    last_result = "network_or_json_error"
+                    continue
+                if isinstance(payload, dict) and payload.get("objectClassName") == "domain":
                     return "busy", "classified"
-                return "need to check", "unexpected_200"
+                last_result = "unexpected_200"
+                continue
             if response.status_code == 404:
                 try:
                     payload = response.json()
                 except ValueError:
-                    return "free", "not_found"
-                if payload.get("errorCode") == 404:
                     return "free", "classified"
-                return "need to check", "ambiguous_404"
+                if isinstance(payload, dict) and payload.get("errorCode") == 404:
+                    return "free", "classified"
+                last_result = "ambiguous_404"
+                continue
             if response.status_code not in {429, 500, 502, 503, 504}:
                 return "need to check", f"http_{response.status_code}"
-        except requests.ConnectTimeout:
+
+        if only_connect_timeouts:
             return "need to check", "connect_timeout"
-        except (requests.RequestException, ValueError):
-            if attempt == MAX_RETRIES:
-                return "need to check", "network_or_json_error"
 
         if attempt < MAX_RETRIES:
             time.sleep(retry_delay(response, attempt))
 
-    return "need to check", "retry_exhausted"
+    return "need to check", last_result
 
 
 def load_targets(

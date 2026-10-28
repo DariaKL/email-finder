@@ -8,7 +8,7 @@ RUN python -m playwright install --with-deps chromium
 
 COPY email_finder.py web_app.py ./
 COPY templates/ templates/
-COPY domain_availability_checker/airtable_donor_status.py domain_availability_checker/instant_bulk_to_sheets.py domain_availability_checker/netim_bulk_to_sheets.py domain_availability_checker/rdap_availability_worker.py domain_availability_checker/rdap_bootstrap.json ./domain_availability_checker/
+COPY domain_availability_checker/airtable_donor_status.py domain_availability_checker/instant_bulk_to_sheets.py domain_availability_checker/netim_bulk_to_sheets.py domain_availability_checker/rdap_availability_worker.py ./domain_availability_checker/
 
 EXPOSE 10000
 
