@@ -103,8 +103,10 @@ def select_netim_records(records: list[dict], mode: str) -> list[dict]:
             record
             for record in records
             if normalize_domain(record.get("fields", {}).get(domain_field))
+            and str(record.get("fields", {}).get(SETTINGS["field_instant"], "")).strip().lower()
+            == "available"
             and str(record.get("fields", {}).get(SETTINGS["field_rdap"], "")).strip().lower()
-            == "need to check"
+            in {"", "need to check"}
         ]
     return [
         record
