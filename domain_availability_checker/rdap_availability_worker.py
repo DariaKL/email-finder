@@ -33,6 +33,7 @@ BOOTSTRAP_FILE = BASE_DIR / "rdap_bootstrap.json"
 MAX_WORKERS = 12
 PER_REGISTRY_INTERVAL_SEC = 1.0
 MAX_RETRIES = 4
+MAX_CONSECUTIVE_REGISTRY_FAILURES = 2
 BATCH_SIZE = 10
 STOP_REQUESTED = threading.Event()
 
@@ -157,12 +158,12 @@ def classify_domain(
                 return "need to check", f"http_{response.status_code}"
         except (requests.RequestException, ValueError):
             if attempt == MAX_RETRIES:
-                return None, "network_or_json_error"
+                return "need to check", "network_or_json_error"
 
         if attempt < MAX_RETRIES:
             time.sleep(retry_delay(response, attempt))
 
-    return None, "retry_exhausted"
+    return "need to check", "retry_exhausted"
 
 
 def load_targets(
@@ -202,13 +203,36 @@ def group_targets_by_registry(
 
 
 def check_registry_group(domains, services, limiter, results) -> None:
+    consecutive_failures = 0
+    registry_unavailable = False
+    host = "unknown"
+    if domains:
+        endpoint = endpoint_for(domains[0], services)
+        if endpoint:
+            host = urlsplit(endpoint).netloc.lower()
+
     for domain in domains:
         if STOP_REQUESTED.is_set():
             return
-        try:
-            status, result = classify_domain(domain, services, limiter)
-        except Exception as exc:
-            status, result = None, f"worker_error:{type(exc).__name__}"
+        if registry_unavailable:
+            status, result = "need to check", "registry_unavailable"
+        else:
+            try:
+                status, result = classify_domain(domain, services, limiter)
+            except Exception as exc:
+                status, result = "need to check", f"worker_error:{type(exc).__name__}"
+
+            if result in {"network_or_json_error", "retry_exhausted"}:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_REGISTRY_FAILURES:
+                    registry_unavailable = True
+                    print(
+                        f"RDAP registry {host} failed {consecutive_failures} consecutive checks; "
+                        "marking remaining domains need to check for Netim fallback.",
+                        flush=True,
+                    )
+            else:
+                consecutive_failures = 0
         results.put((domain, status, result))
 
 
@@ -304,7 +328,7 @@ def run(
                     counts["written"] += len(pending_updates)
                     pending_updates.clear()
 
-            if completed % 50 == 0 or completed == total_domains:
+            if completed % 10 == 0 or completed == total_domains:
                 print(
                     f"Progress {completed}/{total_domains}; free={counts['free']}; "
                     f"busy={counts['busy']}; written={counts['written']}; "
