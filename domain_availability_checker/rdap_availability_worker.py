@@ -156,6 +156,8 @@ def classify_domain(
                 return "need to check", "ambiguous_404"
             if response.status_code not in {429, 500, 502, 503, 504}:
                 return "need to check", f"http_{response.status_code}"
+        except requests.ConnectTimeout:
+            return "need to check", "connect_timeout"
         except (requests.RequestException, ValueError):
             if attempt == MAX_RETRIES:
                 return "need to check", "network_or_json_error"
@@ -222,7 +224,7 @@ def check_registry_group(domains, services, limiter, results) -> None:
             except Exception as exc:
                 status, result = "need to check", f"worker_error:{type(exc).__name__}"
 
-            if result in {"network_or_json_error", "retry_exhausted"}:
+            if result in {"connect_timeout", "network_or_json_error", "retry_exhausted"}:
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_REGISTRY_FAILURES:
                     registry_unavailable = True
