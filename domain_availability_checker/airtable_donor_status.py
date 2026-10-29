@@ -12,7 +12,11 @@ from pyairtable import Api
 from playwright.sync_api import sync_playwright
 
 from instant_bulk_to_sheets import scrape_batch_statuses as scrape_instant_batch
-from netim_bulk_to_sheets import NetimRateLimitError, scrape_batch_statuses as scrape_netim_batch
+from netim_bulk_to_sheets import (
+    NetimAccessError,
+    NetimRateLimitError,
+    scrape_batch_statuses as scrape_netim_batch,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -146,12 +150,15 @@ def check_instant(domains: list[str]) -> dict[str, str] | None:
 
 
 def check_netim_batch(
-    page,
+    context,
     domains: list[str],
     price_results: dict[str, float] | None = None,
 ) -> dict[str, str] | None:
     attempt = 1
     while attempt <= SETTINGS["max_batch_attempts"]:
+        page = context.new_page()
+        page.set_default_timeout(10000)
+        page.set_default_navigation_timeout(60000)
         try:
             return scrape_netim_batch(
                 page,
@@ -159,17 +166,24 @@ def check_netim_batch(
                 SETTINGS["netim_timeout_sec"],
                 price_results=price_results,
             )
+        except NetimAccessError as error:
+            print(f"  {error}; stopping Netim to avoid unreliable checks.", flush=True)
+            return None
         except NetimRateLimitError as error:
             print(
                 f"  {error}; retrying this Airtable batch in {SETTINGS['rate_limit_pause_sec']} seconds.",
                 flush=True,
             )
-            time.sleep(SETTINGS["rate_limit_pause_sec"])
+            attempt += 1
+            if attempt <= SETTINGS["max_batch_attempts"]:
+                time.sleep(SETTINGS["rate_limit_pause_sec"])
         except Exception as error:
             print(f"  Netim attempt {attempt}/{SETTINGS['max_batch_attempts']} failed: {error}", flush=True)
+            attempt += 1
             if attempt < SETTINGS["max_batch_attempts"]:
                 time.sleep(SETTINGS["pause_between_batches_sec"])
-            attempt += 1
+        finally:
+            page.close()
     return None
 
 
@@ -250,15 +264,14 @@ def process_table(table, mode: str = "all") -> None:
     print(f"Netim checks pending: {len(unique_netim)} donors.", flush=True)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=SETTINGS["headless"])
-        page = browser.new_page()
-        page.set_default_navigation_timeout(60000)
+        context = browser.new_context()
         try:
             netim_batches = chunks(unique_netim, SETTINGS["netim_batch_size"])
             for batch_index, batch in enumerate(netim_batches, start=1):
                 domains = [normalize_domain(record["fields"][domain_field]) for record in batch]
                 print(f"Netim batch {batch_index}/{len(netim_batches)}: {len(batch)} donors", flush=True)
                 prices: dict[str, float] = {}
-                statuses = check_netim_batch(page, domains, prices)
+                statuses = check_netim_batch(context, domains, prices)
                 if statuses is not None:
                     if mode == "rdap_need_to_check_netim":
                         confirmed = {
@@ -286,11 +299,13 @@ def process_table(table, mode: str = "all") -> None:
                         flush=True,
                     )
                 else:
-                    print("  Netim batch left blank for a safe restart.", flush=True)
+                    print("  Netim batch left blank; stopping for a safe restart.", flush=True)
+                    break
 
                 if batch_index < len(netim_batches):
                     time.sleep(SETTINGS["pause_between_batches_sec"])
         finally:
+            context.close()
             browser.close()
 
 

@@ -37,6 +37,10 @@ class NetimRateLimitError(RuntimeError):
     pass
 
 
+class NetimAccessError(RuntimeError):
+    pass
+
+
 def normalize_domain(value: str) -> str:
     text = (value or "").strip().lower()
     text = re.sub(r"^https?://", "", text)
@@ -109,10 +113,22 @@ def scrape_batch_statuses(
     expected = {normalize_domain(domain) for domain in domains}
     results: dict[str, str] = {}
     received_payload = False
+    ajax_statuses: list[int] = []
+    rate_limited = False
+    access_block_status: int | None = None
 
     def on_response(response) -> None:
-        nonlocal received_payload
+        nonlocal received_payload, rate_limited, access_block_status
         if "/ajax/resultats-recherche.php" not in response.url:
+            return
+        ajax_statuses.append(response.status)
+        if response.status == 429:
+            rate_limited = True
+            return
+        if response.status in {403, 503}:
+            access_block_status = response.status
+            return
+        if response.status != 200:
             return
         try:
             payload = json.loads(response.text())
@@ -138,20 +154,32 @@ def scrape_batch_statuses(
         response = page.goto("https://www.netim.com/en/domain-name/search", wait_until="domcontentloaded")
         if response and response.status == 429:
             raise NetimRateLimitError("Netim returned HTTP 429 Too Many Requests")
-        page.locator("#recherche-multiple-trigger").click()
+        if response and response.status in {403, 503}:
+            raise NetimAccessError(f"Netim search page returned HTTP {response.status}")
+        page.locator("#recherche-multiple-trigger").wait_for(state="visible", timeout=10000)
+        page.locator("#recherche-multiple-trigger").click(timeout=10000)
         textarea = page.locator("#recherche-domaine-input_multiple")
         textarea.wait_for(state="visible", timeout=10000)
         textarea.fill("\n".join(domains))
-        page.locator("#trigger-search-multiple").click()
+        page.locator("#trigger-search-multiple").click(timeout=10000)
 
         deadline = time.time() + timeout_sec
-        while time.time() < deadline and len(results) < len(expected):
+        while (
+            time.time() < deadline
+            and len(results) < len(expected)
+            and not rate_limited
+            and access_block_status is None
+        ):
             page.wait_for_timeout(500)
     finally:
         page.remove_listener("response", on_response)
 
+    if access_block_status is not None:
+        raise NetimAccessError(f"Netim AJAX endpoint returned HTTP {access_block_status}")
+    if rate_limited:
+        raise NetimRateLimitError("Netim AJAX endpoint returned HTTP 429 Too Many Requests")
     if not received_payload:
-        raise RuntimeError("Netim returned no bulk result payload")
+        raise RuntimeError(f"Netim returned no bulk result payload (AJAX HTTP statuses: {ajax_statuses})")
     return {domain: results.get(domain, "unknown") for domain in expected}
 
 
@@ -225,6 +253,9 @@ def main() -> None:
                             int(SETTINGS["result_timeout_sec"]),
                         )
                         break
+                    except NetimAccessError as error:
+                        print(f"  {error}; stopping Netim to avoid unreliable checks.", flush=True)
+                        return
                     except NetimRateLimitError as error:
                         print(
                             f"  {error}; waiting {SETTINGS['rate_limit_pause_sec']} seconds before retrying this batch.",
