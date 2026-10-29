@@ -270,7 +270,9 @@ def process_table(table, mode: str = "all") -> None:
             for batch_index, batch in enumerate(netim_batches, start=1):
                 domains = [normalize_domain(record["fields"][domain_field]) for record in batch]
                 print(f"Netim batch {batch_index}/{len(netim_batches)}: {len(batch)} donors", flush=True)
-                prices: dict[str, float] = {}
+                prices: dict[str, float] | None = (
+                    None if mode == "rdap_need_to_check_netim" else {}
+                )
                 statuses = check_netim_batch(context, domains, prices)
                 if statuses is not None:
                     if mode == "rdap_need_to_check_netim":
@@ -293,7 +295,7 @@ def process_table(table, mode: str = "all") -> None:
                             if not str(record.get("fields", {}).get(netim_field, "") or "").strip()
                         ]
                         written = save_statuses(table, status_batch, netim_field, statuses)
-                        prices_written = save_prices(table, batch, prices)
+                        prices_written = save_prices(table, batch, prices or {})
                     print(
                         f"  Wrote {written} Netim statuses and {prices_written} Netim prices.",
                         flush=True,

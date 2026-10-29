@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -114,6 +114,28 @@ class NetimBulkTests(unittest.TestCase):
         self.assertIsNone(result)
         context.new_page.assert_called_once_with()
         page.close.assert_called_once_with()
+
+    def test_rdap_fallback_skips_price_parsing(self):
+        table = Mock()
+        table.all.return_value = [
+            {"id": "rec1", "fields": {"Domain": "example.com", "RDAP": "need to check"}}
+        ]
+        context = Mock()
+        browser = Mock()
+        browser.new_context.return_value = context
+        playwright = Mock()
+        playwright.chromium.launch.return_value = browser
+        playwright_manager = MagicMock()
+        playwright_manager.__enter__.return_value = playwright
+
+        with (
+            patch.object(donor_status, "sync_playwright", return_value=playwright_manager),
+            patch.object(donor_status, "check_netim_batch", return_value={"example.com": "available"}) as check_batch,
+            patch.object(donor_status, "save_statuses", return_value=1),
+        ):
+            donor_status.process_table(table, mode="rdap_need_to_check_netim")
+
+        check_batch.assert_called_once_with(context, ["example.com"], None)
 
 
 if __name__ == "__main__":
